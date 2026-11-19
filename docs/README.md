@@ -6,6 +6,10 @@ Index of the project documentation in `docs/`. Check here before writing a new d
 
 | Document | Description |
 |---|---|
+| [architecture.md](./architecture.md) | Data flow from chain to UI: sources, Mermaid diagram, per-page sources and fallbacks, and why totals and links differ |
+| [browser-storage.md](./browser-storage.md) | Every localStorage / sessionStorage key: purpose, data, retention, and how to clear it |
+| [contract-call-surface.md](./contract-call-surface.md) | Every contract method the frontend calls, its ScVal encoding vs the Rust signature, and the proposed spec-drift CI check |
+| [rpc-client-testing.md](./rpc-client-testing.md) | `RpcClient` concurrency, retry, dedupe and cache behaviours, and how to test them with fake timers |
 | [adr/](./adr/README.md) | Architecture Decision Records — one file per significant design decision, with its own index |
 | [indexer-architecture.md](./indexer-architecture.md) | How the indexer turns Soroban contract events into SQLite state: idempotency, cursor recovery, release accounting |
 | [data-sourcing.md](./data-sourcing.md) | The indexer-first, RPC-fallback convention the frontend uses to read lock data |
