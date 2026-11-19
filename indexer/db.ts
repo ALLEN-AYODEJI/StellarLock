@@ -35,7 +35,12 @@ export function initDb() {
       created_at INTEGER NOT NULL,
       extended_count INTEGER DEFAULT 0,
       withdrawn INTEGER DEFAULT 0,
-      released TEXT NOT NULL DEFAULT '0'
+      released TEXT NOT NULL DEFAULT '0',
+      vesting_start INTEGER,
+      vesting_end INTEGER,
+      description TEXT,
+      project_url TEXT,
+      logo_url TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_locks_token ON locks(token);
@@ -51,10 +56,14 @@ export function initDb() {
       id TEXT PRIMARY KEY,
       ledger_seq INTEGER NOT NULL,
       event_type TEXT NOT NULL,
-      lock_id TEXT NOT NULL
+      lock_id TEXT NOT NULL,
+      tx_hash TEXT,
+      ledger_closed_at INTEGER,
+      payload TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_lock_events_ledger ON lock_events(ledger_seq);
+    CREATE INDEX IF NOT EXISTS idx_lock_events_lock_id ON lock_events(lock_id);
 
     CREATE TABLE IF NOT EXISTS notification_subscriptions (
       id          TEXT PRIMARY KEY,
@@ -105,6 +114,40 @@ export function initDb() {
   if (!lockColumns.some((c) => c.name === "released")) {
     db.exec(`ALTER TABLE locks ADD COLUMN released TEXT NOT NULL DEFAULT '0'`)
   }
+
+  // Vesting schedule and project metadata columns — added for Issue #1130.
+  // Populated asynchronously after a create event via a get_lock simulation.
+  if (!lockColumns.some((c) => c.name === "vesting_start")) {
+    db.exec(`ALTER TABLE locks ADD COLUMN vesting_start INTEGER`)
+  }
+  if (!lockColumns.some((c) => c.name === "vesting_end")) {
+    db.exec(`ALTER TABLE locks ADD COLUMN vesting_end INTEGER`)
+  }
+  if (!lockColumns.some((c) => c.name === "description")) {
+    db.exec(`ALTER TABLE locks ADD COLUMN description TEXT`)
+  }
+  if (!lockColumns.some((c) => c.name === "project_url")) {
+    db.exec(`ALTER TABLE locks ADD COLUMN project_url TEXT`)
+  }
+  if (!lockColumns.some((c) => c.name === "logo_url")) {
+    db.exec(`ALTER TABLE locks ADD COLUMN logo_url TEXT`)
+  }
+
+  // lock_events enrichment columns — added for Issue #1129.
+  const eventColumns = db.prepare(`PRAGMA table_info(lock_events)`).all() as { name: string }[]
+  if (!eventColumns.some((c) => c.name === "tx_hash")) {
+    db.exec(`ALTER TABLE lock_events ADD COLUMN tx_hash TEXT`)
+  }
+  if (!eventColumns.some((c) => c.name === "ledger_closed_at")) {
+    db.exec(`ALTER TABLE lock_events ADD COLUMN ledger_closed_at INTEGER`)
+  }
+  if (!eventColumns.some((c) => c.name === "payload")) {
+    db.exec(`ALTER TABLE lock_events ADD COLUMN payload TEXT`)
+  }
+
+  // Index to serve GET /api/indexer-lock-events?lockId= efficiently.
+  // CREATE INDEX IF NOT EXISTS is idempotent — safe to run on every startup.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_lock_events_lock_id ON lock_events(lock_id)`)
 }
 
 export function getMeta(key: string): string | null {
