@@ -22,6 +22,7 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS locks (
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
+      contract_id TEXT NOT NULL DEFAULT '',
       creator TEXT NOT NULL,
       beneficiary TEXT NOT NULL,
       token TEXT NOT NULL,
@@ -148,6 +149,20 @@ export function initDb() {
   // Index to serve GET /api/indexer-lock-events?lockId= efficiently.
   // CREATE INDEX IF NOT EXISTS is idempotent — safe to run on every startup.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_lock_events_lock_id ON lock_events(lock_id)`)
+
+  // contract_id on locks — added for Issue #1127 (namespace by contract address).
+  // Rows created before this column existed keep the empty-string default;
+  // they will be re-indexed with the correct contract_id when the events are
+  // replayed, or operators can clear the DB and let the indexer re-index from
+  // the beginning.
+  if (!lockColumns.some((c) => c.name === "contract_id")) {
+    db.exec(`ALTER TABLE locks ADD COLUMN contract_id TEXT NOT NULL DEFAULT ''`)
+  }
+
+  // contract_id on lock_events — mirrors the locks column for join/filter use.
+  if (!eventColumns.some((c) => c.name === "contract_id")) {
+    db.exec(`ALTER TABLE lock_events ADD COLUMN contract_id TEXT NOT NULL DEFAULT ''`)
+  }
 }
 
 export function getMeta(key: string): string | null {

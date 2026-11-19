@@ -3,7 +3,7 @@ import { getStats, getTopTokens, type IndexedLock, type TokenAggregate } from ".
 type JsonRes = { status: (code: number) => { json: (payload: unknown) => void } }
 
 function serializeLock(lock: IndexedLock) {
-  return { ...lock, amount: lock.amount.toString() }
+  return { ...lock, amount: lock.amount.toString(), released: lock.released.toString() }
 }
 
 function serializeTokenAggregate(agg: TokenAggregate) {

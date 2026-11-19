@@ -6,7 +6,7 @@
  * one user from deleting another's subscription.
  *
  * Query params:
- *   lockId   – the lock id (e.g. "token:1042" or bare "1042")
+ *   lockId   – the lock id (e.g. "CXXX…:1042")
  *   address  – subscriber's Stellar G... address
  *
  * Responses:
@@ -46,7 +46,7 @@ export default function handler(req: Req, res: Res) {
   }
 
   const trimmedLockId = rawLockId.trim()
-  const lockId = /^\d+$/.test(trimmedLockId) ? `token:${trimmedLockId}` : trimmedLockId
+  const lockId = trimmedLockId
 
   db.prepare(
     'DELETE FROM notification_subscriptions WHERE address = ? AND lock_id = ?',

@@ -7,7 +7,7 @@
  *
  * Request body (JSON):
  * {
- *   lockId:      string          – e.g. "token:1042" or "1042"
+ *   lockId:      string          – e.g. "CXXX…:1042"
  *   address:     string          – Stellar G... address of the subscriber
  *   email?:      string          – email address for reminders
  *   webhookUrl?: string          – URL to POST unlock events to
@@ -70,8 +70,8 @@ export default async function handler(req: Req, res: Res) {
     return res.status(400).json({ error: 'at least one of email or webhookUrl is required' })
   }
 
-  // Normalise lockId: bare numeric ids are treated as token locks
-  const lockId = /^\d+$/.test(rawLockId.trim()) ? `token:${rawLockId.trim()}` : rawLockId.trim()
+  // Normalise lockId: trim whitespace only
+  const lockId = rawLockId.trim()
 
   // Upsert: if a subscription already exists for this (address, lock_id) pair,
   // update the channels. Reset reminder flags only when channels change so we

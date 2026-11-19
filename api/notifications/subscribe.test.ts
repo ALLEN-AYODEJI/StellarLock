@@ -122,12 +122,13 @@ describe('POST /api/notifications/subscribe', () => {
       )
     })
 
-    it('normalises a bare numeric lockId to "token:<id>"', async () => {
+    it('passes the lockId as-is (no bare-numeric normalisation)', async () => {
       const insertRun = vi.fn()
       mockDb.prepare.mockReturnValue({ get: vi.fn().mockReturnValue(undefined), run: insertRun })
 
+      const contractId = 'CCONTRACTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
       const req = makeReq('POST', {
-        lockId: '1042',
+        lockId: `${contractId}:1042`,
         address: VALID_ADDRESS,
         email: 'user@example.com',
       })
@@ -136,10 +137,10 @@ describe('POST /api/notifications/subscribe', () => {
       await handler(req, res)
 
       expect(res.status).toHaveBeenCalledWith(201)
-      // The INSERT call should receive the normalised lock id.
+      // The INSERT call should receive the full contract-namespaced lock id.
       const insertCall = insertRun.mock.calls[0]
       expect(insertCall).toBeDefined()
-      expect(insertCall[1]).toBe('token:1042')
+      expect(insertCall[1]).toBe(`${contractId}:1042`)
     })
 
     it('returns the existing id when the subscription already exists', async () => {
