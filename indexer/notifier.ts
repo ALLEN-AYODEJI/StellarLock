@@ -15,7 +15,7 @@
  *   NOTIFIER_INTERVAL_MS – how often to run in self-hosted mode (default 3600000 = 1h)
  */
 
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { pathToFileURL } from 'node:url'
@@ -64,6 +64,7 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET ?? ''
 const NOTIFIER_INTERVAL_MS = Number(process.env.NOTIFIER_INTERVAL_MS ?? 3_600_000)
 const APP_BASE_URL = process.env.PUBLIC_APP_URL ?? 'https://app.stellarlock.xyz'
 const WEBHOOK_TIMEOUT_MS = 10_000
+const EMAIL_TIMEOUT_MS = 10_000
 
 const ONE_DAY_S = 86_400
 const SEVEN_DAYS_S = 7 * ONE_DAY_S
@@ -91,19 +92,28 @@ async function sendEmail(to: string, lock: LockRow, tier: ReminderTier): Promise
       ? `Your StellarLock (ID: ${lock.id}) has reached its unlock date (${unlockDate}). You can now withdraw your tokens.\n\n${lockUrl}`
       : `Your StellarLock (ID: ${lock.id}) will unlock on ${unlockDate}.\n\nVisit ${lockUrl} to view details or extend the lock.`
 
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: EMAIL_FROM,
-      to,
-      subject,
-      text: body,
-    }),
-  })
+  // Bound the request: a hung connection would otherwise stall the whole
+  // dispatch batch and delay every later reminder.
+  let res: Response
+  try {
+    res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: EMAIL_FROM,
+        to,
+        subject,
+        text: body,
+      }),
+      signal: AbortSignal.timeout(EMAIL_TIMEOUT_MS),
+    })
+  } catch (err) {
+    console.error(`[notifier] Resend request for ${to} (lock ${lock.id}) failed:`, err)
+    return
+  }
 
   if (!res.ok) {
     const text = await res.text()
@@ -115,14 +125,23 @@ async function sendEmail(to: string, lock: LockRow, tier: ReminderTier): Promise
 // Webhook dispatch
 // ---------------------------------------------------------------------------
 
-function signPayload(payload: string): string {
-  if (!WEBHOOK_SECRET) return ''
-  return createHmac('sha256', WEBHOOK_SECRET).update(payload).digest('hex')
+/**
+ * Sign `${timestamp}.${payload}` so a captured delivery can't be replayed
+ * indefinitely: receivers reject timestamps outside their tolerance window
+ * (see docs/notification-service.md).
+ */
+export function signPayload(timestamp: number, payload: string, secret = WEBHOOK_SECRET): string {
+  if (!secret) return ''
+  return createHmac('sha256', secret).update(`${timestamp}.${payload}`).digest('hex')
 }
 
 async function sendWebhookReminder(url: string, lock: LockRow, tier: ReminderTier): Promise<void> {
   const reminderDays = tier === '7d' ? 7 : tier === '1d' ? 1 : 0
+  const deliveryId = randomUUID()
+  const timestamp = Math.floor(Date.now() / 1000)
   const payload = JSON.stringify({
+    deliveryId,
+    timestamp,
     event: tier === '0d' ? 'unlocked' : 'unlock_reminder',
     lockId: lock.id,
     unlockAt: lock.unlock_at,
@@ -132,8 +151,12 @@ async function sendWebhookReminder(url: string, lock: LockRow, tier: ReminderTie
     beneficiary: lock.beneficiary,
   })
 
-  const sig = signPayload(payload)
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const sig = signPayload(timestamp, payload)
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-StellarLock-Timestamp': String(timestamp),
+    'X-StellarLock-Delivery': deliveryId,
+  }
   if (sig) headers['X-StellarLock-Signature'] = sig
 
   // Re-validate at dispatch time: the URL was checked at subscribe time, but
@@ -193,31 +216,44 @@ function postWebhook(url: string, headers: Record<string, string>, body: string)
 // ---------------------------------------------------------------------------
 
 /**
- * Determine which reminder tiers are now due for a subscription.
- * Returns an array (possibly empty) of tiers the subscription hasn't been
- * notified for yet and whose window has been crossed.
+ * Determine which reminder tier (if any) is due for a subscription.
+ *
+ * Only the most specific crossed tier is returned: a subscriber who signs up
+ * (or whose lock is indexed) inside the 1-day window gets just the 1-day
+ * reminder, not the 7-day one too. Earlier tiers are marked done alongside
+ * it when the job is dispatched (see `markStmt`).
  */
-function dueTiers(sub: SubscriptionRow, lock: LockRow, nowS: number): ReminderTier[] {
-  const due: ReminderTier[] = []
+export function dueTier(
+  sub: Pick<SubscriptionRow, 'reminded_7d' | 'reminded_1d' | 'reminded_0d'>,
+  lock: Pick<LockRow, 'unlock_at'>,
+  nowS: number,
+): ReminderTier | null {
   const secondsUntil = lock.unlock_at - nowS
 
-  // 7-day window: unlock is ≤7 days away and we haven't sent it
-  if (!sub.reminded_7d && secondsUntil <= SEVEN_DAYS_S) due.push('7d')
-  // 1-day window: unlock is ≤1 day away and we haven't sent it
-  if (!sub.reminded_1d && secondsUntil <= ONE_DAY_S) due.push('1d')
   // At-unlock: unlock has passed (or is right now)
-  if (!sub.reminded_0d && secondsUntil <= 0) due.push('0d')
-
-  return due
+  if (secondsUntil <= 0) return sub.reminded_0d ? null : '0d'
+  // 1-day window: unlock is ≤1 day away
+  if (secondsUntil <= ONE_DAY_S) return sub.reminded_1d ? null : '1d'
+  // 7-day window: unlock is ≤7 days away
+  if (secondsUntil <= SEVEN_DAYS_S) return sub.reminded_7d ? null : '7d'
+  return null
 }
 
+// Marking a tier also marks every earlier tier, so a skipped reminder is
+// never sent later in the same or a subsequent run.
 const markStmt = {
   '7d': (id: string) =>
     db.prepare('UPDATE notification_subscriptions SET reminded_7d = 1 WHERE id = ?').run(id),
   '1d': (id: string) =>
-    db.prepare('UPDATE notification_subscriptions SET reminded_1d = 1 WHERE id = ?').run(id),
+    db
+      .prepare('UPDATE notification_subscriptions SET reminded_7d = 1, reminded_1d = 1 WHERE id = ?')
+      .run(id),
   '0d': (id: string) =>
-    db.prepare('UPDATE notification_subscriptions SET reminded_0d = 1 WHERE id = ?').run(id),
+    db
+      .prepare(
+        'UPDATE notification_subscriptions SET reminded_7d = 1, reminded_1d = 1, reminded_0d = 1 WHERE id = ?',
+      )
+      .run(id),
 }
 
 async function dispatchJob(job: ReminderJob): Promise<void> {
@@ -275,8 +311,8 @@ export async function runNotifier(): Promise<void> {
     const lock = lockMap.get(sub.lock_id)
     if (!lock) continue // lock not yet indexed — skip
 
-    const tiers = dueTiers(sub, lock, nowS)
-    for (const tier of tiers) {
+    const tier = dueTier(sub, lock, nowS)
+    if (tier) {
       jobs.push({ sub, lock, tier, reminderDays: tier === '7d' ? 7 : tier === '1d' ? 1 : 0 })
     }
   }
