@@ -1,4 +1,7 @@
 import { getStats, getTopTokens, type IndexedLock, type TokenAggregate } from "../indexer/index"
+import { createBackendLogger } from "../indexer/logger"
+
+const log = createBackendLogger("api.indexer-stats")
 
 type JsonRes = { status: (code: number) => { json: (payload: unknown) => void } }
 
@@ -28,8 +31,13 @@ export default function handler(_req: unknown, res: JsonRes) {
       recentLocks: stats.recentLocks.map(serializeLock),
       upcomingUnlocks: stats.upcomingUnlocks.map(serializeLock),
       topTokens: topTokens.map(serializeTokenAggregate),
+      lastIndexedLedger: stats.lastIndexedLedger,
+      latestLedger: stats.latestLedger,
+      lagLedgers: stats.lagLedgers,
+      contractStatus: stats.contractStatus,
     })
   } catch (err) {
+    log.error("indexer stats unavailable", { error: err })
     res.status(503).json({
       error: "indexer_unavailable",
       message: err instanceof Error ? err.message : String(err),

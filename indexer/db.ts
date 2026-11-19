@@ -56,6 +56,19 @@ export function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_lock_events_ledger ON lock_events(ledger_seq);
 
+    CREATE TABLE IF NOT EXISTS contract_status (
+      contract_id TEXT PRIMARY KEY,
+      paused INTEGER NOT NULL DEFAULT 0,
+      pending_upgrade_hash TEXT,
+      pending_upgrade_execute_after INTEGER,
+      last_upgrade_hash TEXT,
+      admin TEXT,
+      pending_admin TEXT,
+      last_event TEXT,
+      last_event_ledger INTEGER,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS notification_subscriptions (
       id          TEXT PRIMARY KEY,
       lock_id     TEXT NOT NULL,

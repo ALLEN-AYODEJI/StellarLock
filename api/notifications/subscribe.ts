@@ -21,6 +21,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { db, initDb } from '../../indexer/db.js'
+import { createBackendLogger } from '../../indexer/logger.js'
 import { validateWebhookUrl } from '../../indexer/ssrf.js'
 
 interface Req {
@@ -34,6 +35,9 @@ interface Res {
 
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const LOCK_ID_RE = /^(?:(?:token|lp):\d+|\d+)$/
+const MAX_EMAIL_LENGTH = 254
+const log = createBackendLogger('api.notifications.subscribe')
 export default async function handler(req: Req, res: Res) {
   if (req.method !== 'POST') {
     return res.status(405).end()
@@ -52,10 +56,17 @@ export default async function handler(req: Req, res: Res) {
   if (typeof rawLockId !== 'string' || !rawLockId.trim()) {
     return res.status(400).json({ error: 'lockId is required' })
   }
+  if (!LOCK_ID_RE.test(rawLockId.trim())) {
+    return res.status(400).json({ error: 'lockId must be a numeric id or token:<id>/lp:<id>' })
+  }
   if (typeof address !== 'string' || !STELLAR_ADDRESS_RE.test(address)) {
     return res.status(400).json({ error: 'address must be a valid Stellar address' })
   }
-  if (email !== undefined && email !== null && (typeof email !== 'string' || !EMAIL_RE.test(email))) {
+  if (
+    email !== undefined &&
+    email !== null &&
+    (typeof email !== 'string' || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email))
+  ) {
     return res.status(400).json({ error: 'email is not a valid email address' })
   }
   if (webhookUrl !== undefined && webhookUrl !== null) {
@@ -72,6 +83,7 @@ export default async function handler(req: Req, res: Res) {
 
   // Normalise lockId: bare numeric ids are treated as token locks
   const lockId = /^\d+$/.test(rawLockId.trim()) ? `token:${rawLockId.trim()}` : rawLockId.trim()
+  log.debug('subscription request accepted', { lockId, hasEmail: Boolean(email), hasWebhook: Boolean(webhookUrl) })
 
   // Upsert: if a subscription already exists for this (address, lock_id) pair,
   // update the channels. Reset reminder flags only when channels change so we
