@@ -25,7 +25,6 @@ export interface IndexedLock {
 
 interface AggregateStats {
   totalLocks: number
-  totalValue: bigint
   uniqueTokens: number
   recentLocks: IndexedLock[]
   upcomingUnlocks: IndexedLock[]
@@ -38,6 +37,20 @@ const POLL_INTERVAL_MS = Number(process.env.INDEXER_POLL_INTERVAL_MS || 10_000)
 const EVENTS_PAGE_LIMIT = 100
 /** Max time to wait for a single Soroban RPC call before treating it as failed. */
 const RPC_CALL_TIMEOUT_MS = Number(process.env.INDEXER_RPC_TIMEOUT_MS || 15_000)
+/**
+ * Ledger to start indexing from on the very first run, before any cursor or
+ * `last_indexed_ledger` has been recorded. Set it to the locker contracts'
+ * deploy ledger (record it in contracts/registry.json) so a fresh indexer
+ * backfills every existing lock instead of starting at the chain tip and
+ * missing them. 0 (unset) keeps the historical behaviour of starting at the
+ * RPC's latest ledger. See docs/indexer-architecture.md → "Backfill".
+ */
+const INDEXER_START_LEDGER = Number(process.env.INDEXER_START_LEDGER || 0)
+/**
+ * Max attempts to reprocess a recorded failed event before leaving it for
+ * operator investigation (the count is still surfaced via the health endpoint).
+ */
+const FAILED_EVENT_MAX_ATTEMPTS = 5
 
 const META_CURSOR = "cursor"
 const META_LAST_LEDGER = "last_indexed_ledger"
@@ -320,10 +333,6 @@ export function getStats(): AggregateStats {
     .prepare("SELECT COUNT(*) AS totalLocks, COUNT(DISTINCT token) AS uniqueTokens FROM locks")
     .get() as { totalLocks: number; uniqueTokens: number }
 
-  const totalValue = (
-    db.prepare("SELECT amount FROM locks WHERE status = 'locked'").all() as { amount: string }[]
-  ).reduce((sum, r) => sum + BigInt(r.amount), BigInt(0))
-
   const recentLocks = (
     db.prepare("SELECT * FROM locks ORDER BY created_at DESC, id DESC LIMIT 10").all() as LockRow[]
   ).map(rowToLock)
@@ -336,7 +345,6 @@ export function getStats(): AggregateStats {
 
   return {
     totalLocks: totals.totalLocks,
-    totalValue,
     uniqueTokens: totals.uniqueTokens,
     recentLocks,
     upcomingUnlocks,
@@ -400,6 +408,105 @@ export function getLastIndexed(): number {
   return Number(getMeta(META_LAST_LEDGER) ?? 0)
 }
 
+// ---------------------------------------------------------------------------
+// Failed-event recording & retry (#1122)
+// ---------------------------------------------------------------------------
+
+export interface FailedEventRecord {
+  id: string
+  ledgerSeq: number
+  eventType: string | null
+  attempts: number
+  lastError: string | null
+  lastAttemptAt: number
+}
+
+/**
+ * Serialize a decoded contract event to JSON for later retry, turning bigint
+ * fields (u64/i128 amounts) into strings. `processEvent` re-normalizes every
+ * value through `String()` / `BigInt()` / `Number()` before using it, so the
+ * round-trip indexes the event exactly as the live path would — and this
+ * avoids depending on the SDK's XDR serialization for replay.
+ */
+function serializeEvent(event: ContractEvent): string {
+  return JSON.stringify(event, (_key, value) => (typeof value === "bigint" ? value.toString() : value))
+}
+
+/**
+ * Record an event that could not be processed, so the next poll retries it
+ * instead of permanently dropping the lock state change. The RPC cursor has
+ * already advanced past it, so without this row the event is lost forever.
+ * Replays of the same event id bump `attempts` rather than duplicating rows.
+ */
+function recordFailedEvent(event: ContractEvent, err: unknown): void {
+  const eventType = typeof event.topics[0] === "string" ? event.topics[0] : null
+  db.prepare(
+    `INSERT INTO failed_events (id, ledger_seq, event_type, attempts, last_error, last_attempt_at, payload)
+     VALUES (?, ?, ?, 1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       attempts = attempts + 1,
+       last_error = excluded.last_error,
+       last_attempt_at = excluded.last_attempt_at,
+       payload = excluded.payload`,
+  ).run(
+    event.id,
+    event.ledger,
+    eventType,
+    String((err as Error)?.message ?? err),
+    Math.floor(Date.now() / 1000),
+    serializeEvent(event),
+  )
+}
+
+/**
+ * Re-attempt every recorded failed event whose retry budget hasn't run out.
+ * A successful retry deletes the row; a repeated failure bumps `attempts` and
+ * updates the error/timestamp. Returns the number of events that recovered.
+ */
+export function retryFailedEvents(
+  options: { process?: (event: ContractEvent) => void; maxAttempts?: number } = {},
+): number {
+  ensureDb()
+  const process = options.process ?? processEvent
+  const maxAttempts = options.maxAttempts ?? FAILED_EVENT_MAX_ATTEMPTS
+
+  const rows = db
+    .prepare(`SELECT id, payload FROM failed_events WHERE attempts < ? ORDER BY ledger_seq ASC, id ASC`)
+    .all(maxAttempts) as { id: string; payload: string }[]
+
+  let recovered = 0
+  for (const row of rows) {
+    try {
+      process(JSON.parse(row.payload) as ContractEvent)
+      db.prepare(`DELETE FROM failed_events WHERE id = ?`).run(row.id)
+      recovered++
+    } catch (err) {
+      console.error(`[indexer] retry of failed event ${row.id} failed again:`, err)
+      db.prepare(
+        `UPDATE failed_events SET attempts = attempts + 1, last_error = ?, last_attempt_at = ? WHERE id = ?`,
+      ).run(String((err as Error)?.message ?? err), Math.floor(Date.now() / 1000), row.id)
+    }
+  }
+  return recovered
+}
+
+/** Number of events currently recorded as failed (for the health endpoint). */
+export function getFailedEventsCount(): number {
+  ensureDb()
+  return (db.prepare(`SELECT COUNT(*) AS n FROM failed_events`).get() as { n: number }).n
+}
+
+/** Recent recorded failures (for debugging the count surfaced in health). */
+export function getFailedEvents(limit = 100): FailedEventRecord[] {
+  ensureDb()
+  return db
+    .prepare(
+      `SELECT id, ledger_seq AS ledgerSeq, event_type AS eventType, attempts, last_error AS lastError, last_attempt_at AS lastAttemptAt
+       FROM failed_events ORDER BY last_attempt_at DESC, id ASC LIMIT ?`,
+    )
+    .all(limit) as FailedEventRecord[]
+}
+
 /** Minimal surface of the Soroban RPC Server the poller needs (injectable in tests). */
 interface EventSource {
   getLatestLedger(): Promise<{ sequence: number }>
@@ -442,8 +549,18 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
  * cursor / last ledger in index_meta so progress survives restarts.
  * Returns the number of events processed.
  */
-export async function pollOnce(server: EventSource): Promise<number> {
+export async function pollOnce(
+  server: EventSource,
+  options: { process?: (event: ContractEvent) => void } = {},
+): Promise<number> {
   ensureDb()
+  const process = options.process ?? processEvent
+
+  // Replay events that failed on a previous poll before fetching new ones,
+  // so a transient DB error or decoding bug never silently drops a lock
+  // creation/withdrawal (#1122). The RPC cursor has already moved past them,
+  // so without this they would be lost forever.
+  retryFailedEvents({ process })
 
   const contractIds = [TOKEN_LOCKER_ID, LP_LOCKER_ID].filter(Boolean)
   if (contractIds.length === 0) {
@@ -462,7 +579,9 @@ export async function pollOnce(server: EventSource): Promise<number> {
     const startLedger =
       lastLedger > 0
         ? lastLedger + 1
-        : (await withTimeout(server.getLatestLedger(), RPC_CALL_TIMEOUT_MS, "getLatestLedger")).sequence
+        : INDEXER_START_LEDGER > 0
+          ? INDEXER_START_LEDGER
+          : (await withTimeout(server.getLatestLedger(), RPC_CALL_TIMEOUT_MS, "getLatestLedger")).sequence
     request = { startLedger, filters, limit: EVENTS_PAGE_LIMIT }
   }
 
@@ -486,17 +605,21 @@ export async function pollOnce(server: EventSource): Promise<number> {
 
   let processed = 0
   for (const raw of resp.events) {
+    const event: ContractEvent = {
+      id: raw.id,
+      ledger: raw.ledger,
+      timestamp: raw.ledgerClosedAt ? Math.floor(Date.parse(raw.ledgerClosedAt) / 1000) : undefined,
+      topics: raw.topic.map((t): unknown => scValToNative(t)),
+      data: raw.value ? scValToNative(raw.value) : undefined,
+    }
     try {
-      processEvent({
-        id: raw.id,
-        ledger: raw.ledger,
-        timestamp: raw.ledgerClosedAt ? Math.floor(Date.parse(raw.ledgerClosedAt) / 1000) : undefined,
-        topics: raw.topic.map((t): unknown => scValToNative(t)),
-        data: raw.value ? scValToNative(raw.value) : undefined,
-      })
+      process(event)
       processed++
     } catch (err) {
       console.error(`[indexer] failed to process event ${raw.id}:`, err)
+      // Record it so the next poll retries it instead of permanently losing
+      // the lock state change — the cursor has already moved past it (#1122).
+      recordFailedEvent(event, err)
     }
   }
 

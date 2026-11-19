@@ -56,6 +56,21 @@ export function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_lock_events_ledger ON lock_events(ledger_seq);
 
+    -- Events that failed to process are recorded here and retried on later
+    -- polls (#1122): a transient DB error or decoding bug must never silently
+    -- drop a lock state change, since the RPC cursor has already moved past it.
+    CREATE TABLE IF NOT EXISTS failed_events (
+      id TEXT PRIMARY KEY,
+      ledger_seq INTEGER NOT NULL,
+      event_type TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      last_attempt_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      payload TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_failed_events_ledger ON failed_events(ledger_seq);
+
     CREATE TABLE IF NOT EXISTS notification_subscriptions (
       id          TEXT PRIMARY KEY,
       lock_id     TEXT NOT NULL,

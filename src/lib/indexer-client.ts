@@ -32,7 +32,6 @@ export interface IndexerTokenAggregateDTO {
 
 export interface IndexerStatsDTO {
   totalLocks: number
-  totalValue: string
   uniqueTokens: number
   recentLocks: IndexerLockDTO[]
   upcomingUnlocks: IndexerLockDTO[]

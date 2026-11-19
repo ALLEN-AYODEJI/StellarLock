@@ -150,7 +150,8 @@ describe("lock indexer", () => {
 
     const stats = indexer.getStats()
     expect(stats.totalLocks).toBe(2)
-    expect(stats.totalValue).toBe(750n)
+    // Per-token locked totals (not a cross-token raw sum): 500 (token) + 250 (lp).
+    expect(indexer.getTopTokens().reduce((sum, t) => sum + t.totalLocked, 0n)).toBe(750n)
     expect(stats.uniqueTokens).toBe(2)
     expect(stats.upcomingUnlocks).toHaveLength(2)
     expect(stats.upcomingUnlocks[0].unlockAt).toBe(unlockAt)
@@ -219,10 +220,9 @@ describe("lock indexer", () => {
 
     const stats = indexer.getStats()
     expect(stats.totalLocks).toBe(2)
-    // Only the still-locked LP lock (250) counts toward totalValue — the
-    // token lock (500) was withdrawn in the previous test and the replay
-    // above must not resurrect it.
-    expect(stats.totalValue).toBe(250n)
+    // Only the still-locked LP lock (250) remains — the token lock (500) was
+    // withdrawn in the previous test and the replay above must not resurrect it.
+    expect(indexer.getTopTokens().reduce((sum, t) => sum + t.totalLocked, 0n)).toBe(250n)
     expect(indexer.getLocksForToken(tokenAddr)[0].status).toBe("withdrawn")
   })
 

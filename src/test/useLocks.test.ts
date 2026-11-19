@@ -450,7 +450,6 @@ describe("useDiscoverStats", () => {
   it("returns indexer-sourced stats when indexer is available", async () => {
     const mockStats = {
       totalLocks: 100,
-      totalValue: "0",
       uniqueTokens: 5,
       topTokens: [],
       recentLocks: [],
