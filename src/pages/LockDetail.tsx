@@ -106,7 +106,7 @@ const log = createLogger("LockDetail")
 
 function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: () => void }) {
   const { t } = useTranslation()
-  const { address, signTransaction } = useWallet()
+  const { address, signTransaction, signMessage } = useWallet()
   const navigate = useNavigate()
 
   // Withdraw and extend show their intended outcome immediately and roll back
@@ -484,7 +484,12 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
         )}
 
         {(isBeneficiary || isCreator) && (
-          <NotificationSettings lockId={lock.id} unlockAt={lock.unlockAt} address={address} />
+          <NotificationSettings
+            lockId={lock.id}
+            unlockAt={lock.unlockAt}
+            address={address}
+            signMessage={signMessage}
+          />
         )}
 
         {txPhase !== "idle" && (
