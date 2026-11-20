@@ -218,5 +218,69 @@ describe("Resend email timeout (#1120)", () => {
     expect(
       db.prepare(`SELECT reminded_0d FROM notification_subscriptions WHERE id = 's1'`).get(),
     ).toEqual({ reminded_0d: 1 })
+describe("runNotifier withdrawn locks", () => {
+  it("sends no reminders for a withdrawn lock and closes out the subscription", async () => {
+    guard.allowLoopback = true
+    db.prepare("UPDATE locks SET status = 'withdrawn', withdrawn = 1 WHERE id = 'token:1'").run()
+
+    await runNotifier()
+
+    expect(hits).toEqual([])
+    const row = db
+      .prepare("SELECT reminded_7d, reminded_1d, reminded_0d FROM notification_subscriptions WHERE id = 's1'")
+      .get()
+    expect(row).toEqual({ reminded_7d: 1, reminded_1d: 1, reminded_0d: 1 })
+  })
+})
+
+describe("runNotifier email reminders", () => {
+  const fetchMock = vi.fn(() => Promise.resolve(new Response("{}", { status: 200 })))
+
+  beforeEach(() => {
+    process.env.RESEND_API_KEY = "re_test"
+    process.env.NOTIFICATION_LINK_SECRET = "link-secret"
+    fetchMock.mockClear()
+    vi.stubGlobal("fetch", fetchMock)
+    db.exec("DELETE FROM notification_subscriptions")
+  })
+
+  afterAll(() => {
+    vi.unstubAllGlobals()
+    delete process.env.RESEND_API_KEY
+    delete process.env.NOTIFICATION_LINK_SECRET
+  })
+
+  function insertEmailSub(verified: number) {
+    db.prepare(
+      `INSERT INTO notification_subscriptions (id, lock_id, address, email, email_verified)
+       VALUES ('e1', 'token:1', 'GA', 'user@example.com', ?)`,
+    ).run(verified)
+  }
+
+  it("does not send reminders to an unverified email", async () => {
+    insertEmailSub(0)
+    await runNotifier()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("sends reminders to a verified email with a working lock link and unsubscribe link", async () => {
+    insertEmailSub(1)
+    await runNotifier()
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const body = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body))
+    expect(body.to).toBe("user@example.com")
+    expect(body.text).toContain("/app/lock/token/1")
+    expect(body.text).not.toContain("/app/lock/token:1")
+    expect(body.text).toMatch(/\/api\/notifications\/unsubscribe-email\?id=e1&token=[0-9a-f]{64}/)
+    expect(body.headers["List-Unsubscribe"]).toMatch(/^<https?:\/\/.+\/api\/notifications\/unsubscribe-email\?id=e1&token=[0-9a-f]{64}>$/)
+    expect(body.headers["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click")
+  })
+
+  it("skips verified email reminders for withdrawn locks", async () => {
+    insertEmailSub(1)
+    db.prepare("UPDATE locks SET status = 'withdrawn', withdrawn = 1 WHERE id = 'token:1'").run()
+    await runNotifier()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
