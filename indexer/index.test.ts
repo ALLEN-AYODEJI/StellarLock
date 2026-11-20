@@ -432,6 +432,63 @@ describe("lock indexer", () => {
     expect(lock.released).toBe(1_000n)
   })
 
+  it("re-arms reminder flags whose thresholds move back into the future when a lock is extended (#1117)", async () => {
+    const fresh = await freshIndexer("extend-rearms-reminders")
+    // Same module instances the fresh indexer just loaded (shared module cache).
+    const { db } = await import("./db")
+    const { dueTier } = await import("./notifier")
+
+    const extToken = Keypair.random().publicKey()
+    const nowS = Math.floor(Date.now() / 1000)
+    const originalUnlockAt = nowS - 60 // already reached: every reminder was sent
+    const threeDays = nowS + 3 * 86_400
+    const tenDays = nowS + 10 * 86_400
+
+    const created = makeEvent("ext-created", 801, [
+      sym("lock_created"),
+      u64(77n),
+      addr(creator),
+      addr(extToken),
+      i128(100n),
+      addr(beneficiary),
+      u64(BigInt(originalUnlockAt)),
+    ])
+    const extendTo = (id: string, ledger: number, from: number, to: number) =>
+      makeEvent(id, ledger, [sym("lock_extended"), u64(77n), addr(creator), u64(BigInt(from)), u64(BigInt(to))])
+
+    await fresh.pollOnce(new FakeRpcServer([{ latestLedger: 801, events: [created] }]))
+    db.prepare(
+      `INSERT INTO notification_subscriptions (id, lock_id, address, email, reminded_7d, reminded_1d, reminded_0d)
+       VALUES ('ext-sub', 'token:77', ?, 'user@example.com', 1, 1, 1)`,
+    ).run(beneficiary)
+
+    type Flags = { reminded_7d: number; reminded_1d: number; reminded_0d: number }
+    const flags = () =>
+      db
+        .prepare(`SELECT reminded_7d, reminded_1d, reminded_0d FROM notification_subscriptions WHERE id = 'ext-sub'`)
+        .get() as Flags
+
+    // Extend to 3 days out: the 7-day window is still crossed, but the 1-day
+    // and unlock reminders are in the future again.
+    await fresh.pollOnce(
+      new FakeRpcServer([{ latestLedger: 810, events: [extendTo("ext-1", 810, originalUnlockAt, threeDays)] }]),
+    )
+    expect(flags()).toEqual({ reminded_7d: 1, reminded_1d: 0, reminded_0d: 0 })
+
+    // The notifier now reminds about the new date at the right times.
+    const lock = { unlock_at: threeDays }
+    expect(dueTier(flags(), lock, nowS)).toBeNull()
+    expect(dueTier(flags(), lock, threeDays - 3_600)).toBe("1d")
+    expect(dueTier(flags(), lock, threeDays)).toBe("0d")
+
+    // Extend again, beyond 7 days: every reminder is re-armed.
+    await fresh.pollOnce(
+      new FakeRpcServer([{ latestLedger: 820, events: [extendTo("ext-2", 820, threeDays, tenDays)] }]),
+    )
+    expect(flags()).toEqual({ reminded_7d: 0, reminded_1d: 0, reminded_0d: 0 })
+    expect(dueTier(flags(), { unlock_at: tenDays }, tenDays - 6 * 86_400)).toBe("7d")
+  })
+
   it("does not mark a vesting LP lock fully withdrawn until cumulative releases reach its full amount (#819)", async () => {
     const fresh = await freshIndexer("lp-partial-vesting")
 

@@ -14,6 +14,10 @@
  *   webhookUrl?: string          – URL to POST unlock events to
  * }
  *
+ * Email channels use double opt-in: a new (or changed) email address is
+ * stored unverified and sent a confirmation link pointing at
+ * /api/notifications/verify. Reminders are only sent once it is confirmed.
+ *
  * Responses:
  *   201 { id }            – subscription created / updated
  *   400 { error }         – validation failure
@@ -26,6 +30,7 @@ import { randomUUID } from 'node:crypto'
 import { db, initDb } from '../../indexer/db.js'
 import { validateWebhookUrl } from '../../indexer/ssrf.js'
 import { requireAddressSession } from '../_lib/notification-auth.js'
+import { createVerifyToken, sendVerificationEmail } from '../../indexer/mailer.js'
 
 interface Req {
   method?: string
@@ -39,6 +44,17 @@ interface Res {
 
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+/** Minimum gap between confirmation emails for the same unverified subscription. */
+const VERIFY_RESEND_COOLDOWN_S = 10 * 60
+
+async function sendConfirmation(email: string, lockId: string, token: string) {
+  try {
+    await sendVerificationEmail(email, lockId, token)
+  } catch (err) {
+    console.error('[subscribe] failed to send confirmation email:', err)
+  }
+}
+
 export default async function handler(req: Req, res: Res) {
   if (req.method !== 'POST') {
     return res.status(405).end()
@@ -80,9 +96,22 @@ export default async function handler(req: Req, res: Res) {
   // Upsert: if a subscription already exists for this (address, lock_id) pair,
   // update the channels. Reset reminder flags only when channels change so we
   // don't re-send reminders that were already dispatched.
+  const nowS = Math.floor(Date.now() / 1000)
+
   const existing = db
-    .prepare('SELECT id, email, webhook_url FROM notification_subscriptions WHERE address = ? AND lock_id = ?')
-    .get(address, lockId) as { id: string; email: string | null; webhook_url: string | null } | undefined
+    .prepare(
+      `SELECT id, email, webhook_url, email_verified, email_verify_sent_at
+       FROM notification_subscriptions WHERE address = ? AND lock_id = ?`,
+    )
+    .get(address, lockId) as
+    | {
+        id: string
+        email: string | null
+        webhook_url: string | null
+        email_verified?: number | null
+        email_verify_sent_at?: number | null
+      }
+    | undefined
 
   // Preserve existing values for omitted fields (undefined means not provided;
   // an explicit null clears the channel).
@@ -98,21 +127,53 @@ export default async function handler(req: Req, res: Res) {
   if (existing) {
     const channelsChanged =
       newEmail !== (existing.email ?? null) || newWebhookUrl !== (existing.webhook_url ?? null)
+    // Preserve existing values for omitted fields (undefined means not provided)
+    const newEmail = email !== undefined ? email : existing.email
+    const newWebhookUrl = webhookUrl !== undefined ? webhookUrl : existing.webhook_url
+    const emailChanged = (newEmail ?? null) !== (existing.email ?? null)
+    const channelsChanged = emailChanged || (newWebhookUrl ?? null) !== (existing.webhook_url ?? null)
+
+    // A new address always needs confirming. An unchanged but still
+    // unverified address gets a fresh link, rate-limited so the endpoint
+    // can't be used to flood an inbox with confirmation emails.
+    const verified = !emailChanged && !!existing.email_verified
+    const lastSent = existing.email_verify_sent_at ?? 0
+    const sendVerify =
+      !!newEmail && !verified && (emailChanged || nowS - lastSent >= VERIFY_RESEND_COOLDOWN_S)
+    const verify = sendVerify ? createVerifyToken() : null
 
     db.prepare(
       `UPDATE notification_subscriptions
-       SET email = ?, webhook_url = ?${channelsChanged ? ', reminded_7d = 0, reminded_1d = 0, reminded_0d = 0' : ''}
+       SET email = ?, webhook_url = ?${channelsChanged ? ', reminded_7d = 0, reminded_1d = 0, reminded_0d = 0' : ''}${
+         emailChanged ? ', email_verified = 0, email_verify_token_hash = NULL, email_verify_sent_at = NULL' : ''
+       }
        WHERE id = ?`,
     ).run(newEmail, newWebhookUrl, existing.id)
+
+    if (verify && newEmail) {
+      db.prepare(
+        'UPDATE notification_subscriptions SET email_verify_token_hash = ?, email_verify_sent_at = ? WHERE id = ?',
+      ).run(verify.hash, nowS, existing.id)
+      await sendConfirmation(newEmail, lockId, verify.token)
+    }
 
     return res.status(201).json({ id: existing.id })
   }
 
   const id = randomUUID()
+  const verify = email ? createVerifyToken() : null
   db.prepare(
     `INSERT INTO notification_subscriptions (id, lock_id, address, email, webhook_url)
      VALUES (?, ?, ?, ?, ?)`,
   ).run(id, lockId, address, newEmail, newWebhookUrl)
+    `INSERT INTO notification_subscriptions
+       (id, lock_id, address, email, webhook_url, email_verified, email_verify_token_hash, email_verify_sent_at)
+     VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+  ).run(id, lockId, address, email ?? null, webhookUrl ?? null, verify?.hash ?? null, verify ? nowS : null)
+
+  if (verify && email) {
+    await sendConfirmation(email, lockId, verify.token)
+  }
 
   return res.status(201).json({ id })
 }
