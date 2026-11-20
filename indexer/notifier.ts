@@ -378,7 +378,18 @@ const isMain =
 if (isMain) {
   console.log(`[notifier] running every ${NOTIFIER_INTERVAL_MS / 1000}s`)
   void runNotifier()
-  setInterval(() => {
+  const timer = setInterval(() => {
     void runNotifier()
   }, NOTIFIER_INTERVAL_MS)
+
+  const shutdown = (signal: string) => {
+    console.log(`[notifier] received ${signal}, shutting down gracefully…`)
+    clearInterval(timer)
+    db.close()
+    console.log(`[notifier] clean shutdown complete`)
+    process.exit(0)
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT',  () => shutdown('SIGINT'))
 }

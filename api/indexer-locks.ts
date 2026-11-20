@@ -38,6 +38,7 @@ export default function handler(req: QueryReq, res: JsonRes) {
     const { locks, total } = getLocksForTokenPage(token, offset, limit)
     res.status(200).json({
       total,
+      locks: locks.map((lock) => ({ ...lock, amount: lock.amount.toString(), released: lock.released.toString() })),
       locks: locks.map(serializeLock),
     })
   } catch (err) {
