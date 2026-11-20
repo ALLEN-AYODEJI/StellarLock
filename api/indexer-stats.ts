@@ -2,11 +2,13 @@ import { getStats, getTopTokens, type IndexedLock, type TokenAggregate } from ".
 import { createBackendLogger } from "../indexer/logger"
 
 const log = createBackendLogger("api.indexer-stats")
+import { getStats, getTopTokens, type TokenAggregate } from "../indexer/index"
+import { serializeLock } from "./_lib/serialize-lock"
 
 type JsonRes = { status: (code: number) => { json: (payload: unknown) => void } }
 
 function serializeLock(lock: IndexedLock) {
-  return { ...lock, amount: lock.amount.toString() }
+  return { ...lock, amount: lock.amount.toString(), released: lock.released.toString() }
 }
 
 function serializeTokenAggregate(agg: TokenAggregate) {
@@ -26,7 +28,6 @@ export default function handler(_req: unknown, res: JsonRes) {
 
     res.status(200).json({
       totalLocks: stats.totalLocks,
-      totalValue: stats.totalValue.toString(),
       uniqueTokens: stats.uniqueTokens,
       recentLocks: stats.recentLocks.map(serializeLock),
       upcomingUnlocks: stats.upcomingUnlocks.map(serializeLock),
