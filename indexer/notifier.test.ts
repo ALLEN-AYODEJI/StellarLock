@@ -25,6 +25,12 @@ vi.mock("./ssrf", async (importOriginal) => {
 
 const tmpDir = mkdtempSync(join(tmpdir(), "notifier-test-"))
 process.env.LOCK_INDEX_DB_PATH = join(tmpDir, "notifier.sqlite")
+// sendEmail() short-circuits when RESEND_API_KEY is empty. A non-empty value
+// here lets the email-link test exercise the Resend request path through a
+// stubbed global fetch. The existing webhook-only tests are unaffected
+// because their subscriptions carry no email address.
+const previousResendKey = process.env.RESEND_API_KEY
+process.env.RESEND_API_KEY = "test-key"
 // Read by the notifier at import time.
 process.env.WEBHOOK_SECRET = "test-webhook-secret"
 process.env.RESEND_API_KEY = "test-resend-key"
@@ -60,6 +66,7 @@ afterAll(async () => {
   await new Promise((r) => server.close(r))
   db.close()
   rmSync(tmpDir, { recursive: true, force: true })
+  process.env.RESEND_API_KEY = previousResendKey
 })
 
 beforeEach(() => {
@@ -102,6 +109,66 @@ describe("runNotifier webhook dispatch", () => {
   })
 })
 
+describe("runNotifier reminder tiers", () => {
+  it("subscribing within 1 day of unlock still sends the 7d and 1d reminders in one run", async () => {
+    guard.allowLoopback = true
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    const now = Math.floor(Date.now() / 1000)
+    // 12h away: both the 7d and 1d windows are crossed; 0d is not (future).
+    db.prepare("UPDATE locks SET unlock_at = ? WHERE id = 'token:1'").run(now + 12 * 3600)
+
+    await runNotifier()
+
+    // A late subscriber still catches every reminder whose window has already
+    // passed, in a single dispatch run.
+    expect(hits.length).toBe(2)
+    errSpy.mockRestore()
+  })
+
+  it("does not re-send the 7d reminder for a lock extended back into the 7-day window", async () => {
+    guard.allowLoopback = true
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    const now = Math.floor(Date.now() / 1000)
+    // The 7d reminder already fired; the lock was then extended to 5 days out.
+    db.prepare("UPDATE locks SET unlock_at = ? WHERE id = 'token:1'").run(now + 5 * 86_400)
+    db.prepare("UPDATE notification_subscriptions SET reminded_7d = 1 WHERE id = 's1'").run()
+
+    await runNotifier()
+
+    // 7d stays suppressed (flag is set); 5d is outside the 1d/0d windows.
+    expect(hits).toEqual([])
+    errSpy.mockRestore()
+  })
+
+  it("does not dispatch further reminders for a withdrawn lock that already received its unlock reminder", async () => {
+    guard.allowLoopback = true
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    const now = Math.floor(Date.now() / 1000)
+    // Lock unlocked, withdrawn, and every reminder already sent.
+    db.prepare("UPDATE locks SET status = 'withdrawn', withdrawn = 1, unlock_at = ? WHERE id = 'token:1'")
+      .run(now - 10)
+    db.prepare(
+      "UPDATE notification_subscriptions SET reminded_7d = 1, reminded_1d = 1, reminded_0d = 1 WHERE id = 's1'",
+    ).run()
+
+    await runNotifier()
+
+    // reminded_0d = 1 filters the subscription out of the scan entirely.
+    expect(hits).toEqual([])
+    errSpy.mockRestore()
+  })
+
+  it("a second run over the same window dispatches no duplicate reminders", async () => {
+    guard.allowLoopback = true
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    await runNotifier() // first pass: 7d + 1d + 0d
+    expect(hits.length).toBe(3)
+    hits.length = 0
+
+    await runNotifier() // second pass: all flags set → nothing due
+    expect(hits).toEqual([])
+    errSpy.mockRestore()
 describe("webhook signing (#1119)", () => {
   it("sends a timestamp and delivery id and signs `timestamp.payload`", async () => {
     guard.allowLoopback = true
@@ -234,6 +301,32 @@ describe("runNotifier withdrawn locks", () => {
 })
 
 describe("runNotifier email reminders", () => {
+  it("the unlock email links to the lock detail page", async () => {
+    // The seeded subscription is webhook-only; switch it to email so sendEmail
+    // runs. The lock is already past its unlock date (now - 10s), so the 0d
+    // "your lock has unlocked" email is among those dispatched.
+    db.prepare("UPDATE notification_subscriptions SET email = ?, webhook_url = NULL WHERE id = 's1'")
+      .run("user@example.com")
+
+    const emails: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init: any) => {
+        if (init?.body) emails.push(String(init.body))
+        return { ok: true, status: 200, text: async () => "" } as Response
+      }),
+    )
+
+    try {
+      await runNotifier()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    expect(emails.length).toBeGreaterThan(0)
+    // Every reminder email body ends with a link to the lock's detail page:
+    //   <APP_BASE_URL>/app/lock/<lockId>
+    expect(emails.some((body) => /https:\/\/[^/\s]+\/app\/lock\/token:1/.test(body))).toBe(true)
   const fetchMock = vi.fn(() => Promise.resolve(new Response("{}", { status: 200 })))
 
   beforeEach(() => {
