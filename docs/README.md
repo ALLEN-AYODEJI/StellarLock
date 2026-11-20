@@ -17,6 +17,7 @@ Index of the project documentation in `docs/`. Check here before writing a new d
 
 | Document | Description |
 |---|---|
+| [deploying-backend.md](./deploying-backend.md) | Running the indexer and notifier in production: Docker Compose / hosted setup, env vars, health checks, backups, cursor and DB recovery (issue #1162) |
 | [incident-response.md](./incident-response.md) | Operator runbook for emergency `pause()` / `unpause()` on both contracts |
 | [security-audit.md](./security-audit.md) | Contract threat model and security audit checklist |
 | [troubleshooting.md](./troubleshooting.md) | Common user-facing errors (wallet, network, transactions, contract) with causes and fixes |
@@ -27,6 +28,11 @@ Index of the project documentation in `docs/`. Check here before writing a new d
 |---|---|
 | [changes.md](./changes.md) | Hand-written rationale behind selected changes, by issue (the release list lives in [CHANGELOG.md](../CHANGELOG.md)) |
 | [roadmap-notes.md](./roadmap-notes.md) | Internal planning notes on open feature gaps (batch lock creation, Arabic localization) |
+| [bounty-payout-policy-357.md](./bounty-payout-policy-357.md) | Contribution and bounty payout policy (issue #357) |
+| [issue-713-bulk-partial-failure.md](./issue-713-bulk-partial-failure.md) | Analysis of untested partial-failure handling in MyLocks bulk extend/transfer (issue #713) |
+| [issue-1160-dependabot-docker.md](./issue-1160-dependabot-docker.md) | Adding a Dependabot `docker` entry for `Dockerfile.dev` / `Dockerfile.contracts` (issue #1160) |
+| [issue-1161-notification-settings-e2e.md](./issue-1161-notification-settings-e2e.md) | E2E test plan for the LockDetail notification panel's subscribe/unsubscribe requests (issue #1161) |
+| [issue-1163-db-migration-smoke-tests.md](./issue-1163-db-migration-smoke-tests.md) | Fixture-based tests for `initDb()` migrations from each historical schema (issue #1163) |
 | [bounty-payout-policy.md](./bounty-payout-policy.md) | Contribution and bounty payout policy |
 | [bulk-actions-partial-failure.md](./bulk-actions-partial-failure.md) | Analysis of untested partial-failure handling in MyLocks bulk extend/transfer |
 | [screenshots/](./screenshots/) | App screenshots embedded in the main README |
