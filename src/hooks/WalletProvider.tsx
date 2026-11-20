@@ -217,6 +217,20 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     [address],
   )
 
+  const signMessage = useCallback(
+    async (message: string): Promise<string> => {
+      if (!address) throw new Error("Wallet not connected")
+      const k = getKit()
+      const result = await k.signMessage(message, {
+        networkPassphrase: NETWORK.passphrase,
+        address,
+      })
+      if (!result.signedMessage) throw new Error("Wallet returned no signature — did you approve it?")
+      return result.signedMessage
+    },
+    [address],
+  )
+
   const value = useMemo<WalletContextValue>(
     () => ({
       address,
@@ -232,6 +246,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       dismissDisconnectAlert,
       dismissNetworkAlert,
       signTransaction,
+      signMessage,
     }),
     [
       address,
@@ -246,6 +261,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       dismissDisconnectAlert,
       dismissNetworkAlert,
       signTransaction,
+      signMessage,
     ],
   )
 

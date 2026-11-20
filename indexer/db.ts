@@ -71,6 +71,9 @@ export function initDb() {
       lock_id     TEXT NOT NULL,
       address     TEXT NOT NULL,
       email       TEXT,
+      email_verified INTEGER NOT NULL DEFAULT 0,
+      email_verify_token_hash TEXT,
+      email_verify_sent_at INTEGER,
       webhook_url TEXT,
       reminded_7d INTEGER DEFAULT 0,
       reminded_1d INTEGER DEFAULT 0,
@@ -105,6 +108,23 @@ export function initDb() {
       `)
     })()
   }
+
+  // Double opt-in columns were added after notification_subscriptions first
+  // shipped. Existing rows start unverified, so they only resume receiving
+  // reminder emails once the address is confirmed via a fresh subscribe.
+  const subColumns = db.prepare(`PRAGMA table_info(notification_subscriptions)`).all() as { name: string }[]
+  if (!subColumns.some((c) => c.name === "email_verified")) {
+    db.exec(`ALTER TABLE notification_subscriptions ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0`)
+  }
+  if (!subColumns.some((c) => c.name === "email_verify_token_hash")) {
+    db.exec(`ALTER TABLE notification_subscriptions ADD COLUMN email_verify_token_hash TEXT`)
+  }
+  if (!subColumns.some((c) => c.name === "email_verify_sent_at")) {
+    db.exec(`ALTER TABLE notification_subscriptions ADD COLUMN email_verify_sent_at INTEGER`)
+  }
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_subs_verify_token ON notification_subscriptions(email_verify_token_hash)`,
+  )
 
   // `released` was added after `locks` first shipped — back-fill it for
   // databases created before this column existed. Every already-indexed

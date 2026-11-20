@@ -105,6 +105,17 @@ function buildStatements() {
       UPDATE locks SET released = @released, status = @status, withdrawn = @withdrawn WHERE id = @id
     `),
     extendUnlock: db.prepare(`UPDATE locks SET unlock_at = ?, extended_count = extended_count + 1 WHERE id = ?`),
+    // After an extension, re-arm any reminder whose threshold is now in the
+    // future again, so subscribers are reminded about the new unlock date
+    // (and aren't left believing the lock already unlocked). Thresholds match
+    // the notifier's: a tier fires once seconds-until-unlock is <= its window.
+    rearmReminders: db.prepare(`
+      UPDATE notification_subscriptions SET
+        reminded_7d = CASE WHEN @unlock_at - @now > ${7 * 86_400} THEN 0 ELSE reminded_7d END,
+        reminded_1d = CASE WHEN @unlock_at - @now > 86400 THEN 0 ELSE reminded_1d END,
+        reminded_0d = CASE WHEN @unlock_at - @now > 0 THEN 0 ELSE reminded_0d END
+      WHERE lock_id = @lock_id
+    `),
     setBeneficiary: db.prepare(`UPDATE locks SET beneficiary = ? WHERE id = ?`),
     insertEvent: db.prepare(
       `INSERT OR IGNORE INTO lock_events (id, ledger_seq, event_type, lock_id, contract_id, tx_hash, ledger_closed_at, payload)
@@ -199,6 +210,12 @@ function applyRelease(s: ReturnType<typeof buildStatements>, lockId: string, rel
   })
 }
 
+/** Apply a lock extension and re-arm reminders whose thresholds moved back into the future. */
+function extendLock(s: ReturnType<typeof buildStatements>, lockId: string, newUnlockAt: number) {
+  s.extendUnlock.run(newUnlockAt, lockId)
+  s.rearmReminders.run({ lock_id: lockId, unlock_at: newUnlockAt, now: Math.floor(Date.now() / 1000) })
+}
+
 /**
  * Parse a locker contract event and upsert it into the SQLite index.
  * Token-locker events carry their payload in the topics; lp-locker
@@ -287,6 +304,9 @@ export function processEvent(event: ContractEvent): string | undefined {
         const lid = mkLockId(id)
         if (!s.insertEvent.run(eventParams(lid)).changes) return
         s.extendUnlock.run(Number(newUnlockAt), lid)
+        const lockId = `token:${String(id)}`
+        if (!s.insertEvent.run(event.id, event.ledger, name, lockId).changes) return
+        extendLock(s, lockId, Number(newUnlockAt))
         break
       }
       case "beneficiary_transferred": {
@@ -344,6 +364,9 @@ export function processEvent(event: ContractEvent): string | undefined {
         const lid = mkLockId(id)
         if (!s.insertEvent.run(eventParams(lid)).changes) return
         s.extendUnlock.run(Number(newUnlockAt), lid)
+        const lockId = `lp:${String(id)}`
+        if (!s.insertEvent.run(event.id, event.ledger, name, lockId).changes) return
+        extendLock(s, lockId, Number(newUnlockAt))
         break
       }
       case "lp_beneficiary_transferred": {
