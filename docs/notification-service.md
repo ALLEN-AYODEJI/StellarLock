@@ -35,6 +35,8 @@ REST endpoints for the frontend to register/unregister notification preferences.
 | POST | `/api/notifications/subscribe` | Register for lock notifications |
 | DELETE | `/api/notifications/unsubscribe?lockId=...&address=...` | Unsubscribe from a lock |
 | GET | `/api/notifications/subscriptions` | List user's subscriptions |
+| GET | `/api/notifications/verify?token=...` | Confirm an email address (double opt-in link) |
+| GET / POST | `/api/notifications/unsubscribe-email?id=...&token=...` | Signed one-click email unsubscribe (GET shows a confirm button; POST unsubscribes, RFC 8058) |
 
 #### Subscribe payload
 
@@ -48,6 +50,13 @@ REST endpoints for the frontend to register/unregister notification preferences.
 ```
 
 At least one of `email` or `webhookUrl` must be provided.
+
+Emails use double opt-in: a new or changed address is stored unverified and
+sent a confirmation link (`/api/notifications/verify`, valid for 48 hours).
+Reminders are only emailed to verified addresses. Every reminder email
+includes a signed unsubscribe link and `List-Unsubscribe` /
+`List-Unsubscribe-Post` headers. Subscriptions for withdrawn locks are closed
+out without sending further reminders.
 
 #### Unsubscribe parameters
 
