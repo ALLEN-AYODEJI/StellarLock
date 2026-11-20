@@ -86,6 +86,8 @@ jobs:
 
       - name: Lint (ESLint)
         run: pnpm exec eslint .
+      - name: Format check
+        run: pnpm format:check
 
       - name: Type Check
         run: pnpm exec tsc -b
@@ -98,6 +100,8 @@ jobs:
 
       - name: Unit / component tests
         run: pnpm test
+      - name: Unit / component coverage
+        run: pnpm test:coverage
 
       - name: Storybook build
         run: pnpm storybook:build
