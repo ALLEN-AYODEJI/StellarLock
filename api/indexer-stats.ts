@@ -24,7 +24,6 @@ export default function handler(_req: unknown, res: JsonRes) {
 
     res.status(200).json({
       totalLocks: stats.totalLocks,
-      totalValue: stats.totalValue.toString(),
       uniqueTokens: stats.uniqueTokens,
       recentLocks: stats.recentLocks.map(serializeLock),
       upcomingUnlocks: stats.upcomingUnlocks.map(serializeLock),
