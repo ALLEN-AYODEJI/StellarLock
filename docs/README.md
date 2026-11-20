@@ -10,7 +10,8 @@ Index of the project documentation in `docs/`. Check here before writing a new d
 | [indexer-architecture.md](./indexer-architecture.md) | How the indexer turns Soroban contract events into SQLite state: idempotency, cursor recovery, release accounting |
 | [data-sourcing.md](./data-sourcing.md) | The indexer-first, RPC-fallback convention the frontend uses to read lock data |
 | [notification-service.md](./notification-service.md) | Unlock-reminder notifier: cron worker, subscription API, schema, and email/webhook delivery |
-| [storage-optimization-148.md](./storage-optimization-148.md) | Contract storage and rent optimizations for `token-locker` and `lp-locker` (issue #148) |
+| [storage-optimization.md](./storage-optimization.md) | Contract storage and rent optimizations for `token-locker` and `lp-locker` |
+| [lp-pool-token-verification.md](./lp-pool-token-verification.md) | Best-effort pool-token verification in `lp-locker` and its security implications |
 
 ## Operations & security
 
@@ -32,4 +33,6 @@ Index of the project documentation in `docs/`. Check here before writing a new d
 | [issue-1160-dependabot-docker.md](./issue-1160-dependabot-docker.md) | Adding a Dependabot `docker` entry for `Dockerfile.dev` / `Dockerfile.contracts` (issue #1160) |
 | [issue-1161-notification-settings-e2e.md](./issue-1161-notification-settings-e2e.md) | E2E test plan for the LockDetail notification panel's subscribe/unsubscribe requests (issue #1161) |
 | [issue-1163-db-migration-smoke-tests.md](./issue-1163-db-migration-smoke-tests.md) | Fixture-based tests for `initDb()` migrations from each historical schema (issue #1163) |
+| [bounty-payout-policy.md](./bounty-payout-policy.md) | Contribution and bounty payout policy |
+| [bulk-actions-partial-failure.md](./bulk-actions-partial-failure.md) | Analysis of untested partial-failure handling in MyLocks bulk extend/transfer |
 | [screenshots/](./screenshots/) | App screenshots embedded in the main README |

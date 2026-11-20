@@ -296,7 +296,6 @@ describe("queryLocks", () => {
     it("builds indexer-backed stats with token groups, prices and enriched locks", async () => {
       fetchIndexerStats.mockResolvedValue({
         totalLocks: 10,
-        totalValue: "1000",
         uniqueTokens: 2,
         recentLocks: [{ id: "1" }],
         upcomingUnlocks: [{ id: "2" }],
