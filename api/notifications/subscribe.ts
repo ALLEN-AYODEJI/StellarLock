@@ -28,6 +28,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { db, initDb } from '../../indexer/db.js'
+import { createBackendLogger } from '../../indexer/logger.js'
 import { validateWebhookUrl } from '../../indexer/ssrf.js'
 import { requireAddressSession } from '../_lib/notification-auth.js'
 import { createVerifyToken, sendVerificationEmail } from '../../indexer/mailer.js'
@@ -44,6 +45,9 @@ interface Res {
 
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const LOCK_ID_RE = /^(?:(?:token|lp):\d+|\d+)$/
+const MAX_EMAIL_LENGTH = 254
+const log = createBackendLogger('api.notifications.subscribe')
 /** Minimum gap between confirmation emails for the same unverified subscription. */
 const VERIFY_RESEND_COOLDOWN_S = 10 * 60
 
@@ -73,9 +77,17 @@ export default async function handler(req: Req, res: Res) {
   if (typeof rawLockId !== 'string' || !rawLockId.trim()) {
     return res.status(400).json({ error: 'lockId is required' })
   }
+  if (!LOCK_ID_RE.test(rawLockId.trim())) {
+    return res.status(400).json({ error: 'lockId must be a numeric id or token:<id>/lp:<id>' })
+  }
   if (typeof address !== 'string' || !STELLAR_ADDRESS_RE.test(address)) {
     return res.status(400).json({ error: 'address must be a valid Stellar address' })
   }
+  if (
+    email !== undefined &&
+    email !== null &&
+    (typeof email !== 'string' || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email))
+  ) {
   // Caller must prove they own `address` (see api/_lib/notification-auth.ts).
   if (!requireAddressSession(req, res, address)) return
   if (email !== undefined && email !== null && (typeof email !== 'string' || !EMAIL_RE.test(email))) {
@@ -90,6 +102,9 @@ export default async function handler(req: Req, res: Res) {
     if (urlErr) return res.status(400).json({ error: urlErr })
   }
 
+  // Normalise lockId: bare numeric ids are treated as token locks
+  const lockId = /^\d+$/.test(rawLockId.trim()) ? `token:${rawLockId.trim()}` : rawLockId.trim()
+  log.debug('subscription request accepted', { lockId, hasEmail: Boolean(email), hasWebhook: Boolean(webhookUrl) })
   // Normalise lockId: trim whitespace only
   const lockId = rawLockId.trim()
 

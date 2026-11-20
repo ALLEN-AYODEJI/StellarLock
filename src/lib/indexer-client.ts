@@ -39,11 +39,23 @@ export interface IndexerStatsDTO {
   recentLocks: IndexerLockDTO[]
   upcomingUnlocks: IndexerLockDTO[]
   topTokens: IndexerTokenAggregateDTO[]
+  lastIndexedLedger?: number
+  latestLedger?: number
+  lagLedgers?: number
+  contractStatus?: Array<{
+    contractId: string
+    paused: boolean
+    pendingUpgradeHash: string | null
+    pendingUpgradeExecuteAfter: number | null
+  }>
 }
 
 export interface IndexerLocksPageDTO {
   total: number
   locks: IndexerLockDTO[]
+  lastIndexedLedger?: number
+  latestLedger?: number
+  lagLedgers?: number
 }
 
 const FETCH_TIMEOUT_MS = 3000
@@ -53,6 +65,7 @@ const CACHE_TTL_MS = 10_000
 // adding the new one. This prevents unbounded growth when a user browses many
 // token/page combinations in a long-lived session (fixes #755).
 const CACHE_MAX_SIZE = 100
+const MAX_ACCEPTABLE_LAG = Number(import.meta.env.VITE_INDEXER_MAX_LAG_LEDGERS ?? 20)
 
 interface CacheEntry<T> {
   data: T
@@ -86,6 +99,16 @@ async function fetchJson<T>(url: string): Promise<T | null> {
       return null
     }
     const data = (await res.json()) as T
+
+    const lagLedgers = (data as { lagLedgers?: unknown }).lagLedgers
+    if (typeof lagLedgers === "number" && lagLedgers > MAX_ACCEPTABLE_LAG) {
+      log.warn("indexer lag exceeds fallback threshold", {
+        lagLedgers,
+        maxAcceptableLag: MAX_ACCEPTABLE_LAG,
+        url,
+      })
+      return null
+    }
 
     // Enforce hard size cap: evict the oldest entry (Maps preserve insertion
     // order) before inserting a new one so memory stays bounded even when

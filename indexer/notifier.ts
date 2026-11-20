@@ -24,8 +24,11 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { pathToFileURL } from 'node:url'
 import { db, initDb } from './db.js'
+import { createBackendLogger } from './logger.js'
 import { lockUrl, sendResendEmail, unsubscribeUrl } from './mailer.js'
 import { safeLookup, validateWebhookUrl } from './ssrf.js'
+
+const log = createBackendLogger('notifier')
 
 // ---------------------------------------------------------------------------
 // Types
@@ -77,6 +80,12 @@ const SEVEN_DAYS_S = 7 * ONE_DAY_S
 // Email via Resend
 // ---------------------------------------------------------------------------
 
+async function sendEmail(to: string, lock: LockRow, tier: ReminderTier): Promise<void> {
+  if (!RESEND_API_KEY) {
+    log.warn('RESEND_API_KEY not set; skipping email', { recipient: to })
+    return
+  }
+
 /** Build the reminder email (subject, body with unsubscribe link, headers). */
 function buildReminderEmail(
   subscriptionId: string,
@@ -122,6 +131,7 @@ function buildReminderEmail(
 
   if (!res.ok) {
     const text = await res.text()
+    log.error('Resend email failed', { recipient: to, lockId: lock.id, response: text })
     console.error(`[notifier] Resend error for ${to} (lock ${lock.id}):`, text)
   const text = `${main}\n\n--\nDon't want these reminders? Unsubscribe: ${unsubUrl}`
 
@@ -182,19 +192,19 @@ async function sendWebhookReminder(url: string, lock: LockRow, tier: ReminderTie
   // its DNS may have changed since (or the row predates the resolving check).
   const urlErr = await validateWebhookUrl(url)
   if (urlErr) {
-    console.error(`[notifier] webhook ${url} rejected: ${urlErr}`)
+    log.warn('webhook rejected', { url, reason: urlErr })
     return
   }
 
   try {
     const status = await postWebhook(url, headers, payload)
     if (status >= 300 && status < 400) {
-      console.error(`[notifier] webhook POST to ${url} returned redirect ${status} — not followed`)
+      log.warn('webhook redirect rejected', { url, status })
     } else if (status < 200 || status >= 300) {
-      console.error(`[notifier] webhook POST to ${url} failed: ${status}`)
+      log.error('webhook delivery failed', { url, status })
     }
   } catch (err) {
-    console.error(`[notifier] webhook POST to ${url} threw:`, err)
+    log.error('webhook delivery threw', { url, error: err })
   }
 }
 
@@ -355,7 +365,7 @@ export async function runNotifier(): Promise<void> {
 
   if (jobs.length === 0) return
 
-  console.log(`[notifier] dispatching ${jobs.length} reminder(s)`)
+  log.info('dispatching reminders', { count: jobs.length })
 
   // Run all jobs concurrently but cap parallelism to avoid hammering APIs.
   const CONCURRENCY = 10
@@ -363,7 +373,7 @@ export async function runNotifier(): Promise<void> {
     await Promise.allSettled(jobs.slice(i, i + CONCURRENCY).map(dispatchJob))
   }
 
-  console.log(`[notifier] done`)
+  log.info('reminder dispatch complete', { count: jobs.length })
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +386,7 @@ const isMain =
   import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (isMain) {
-  console.log(`[notifier] running every ${NOTIFIER_INTERVAL_MS / 1000}s`)
+  log.info('notifier started', { intervalMs: NOTIFIER_INTERVAL_MS })
   void runNotifier()
   const timer = setInterval(() => {
     void runNotifier()

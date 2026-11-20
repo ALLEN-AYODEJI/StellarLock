@@ -2,6 +2,9 @@ import { pathToFileURL } from "node:url"
 import { Server } from "@stellar/stellar-sdk/rpc"
 import { scValToNative, xdr, Contract, TransactionBuilder, BASE_FEE, Networks, nativeToScVal } from "@stellar/stellar-sdk"
 import { initDb, db, getMeta, setMeta, deleteMeta } from "./db"
+import { createBackendLogger } from "./logger"
+
+const log = createBackendLogger("indexer")
 
 export interface IndexedLock {
   id: string
@@ -37,6 +40,10 @@ interface AggregateStats {
   uniqueTokens: number
   recentLocks: IndexedLock[]
   upcomingUnlocks: IndexedLock[]
+  lastIndexedLedger: number
+  latestLedger: number
+  lagLedgers: number
+  contractStatus: ContractStatus[]
 }
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org"
@@ -63,6 +70,7 @@ const FAILED_EVENT_MAX_ATTEMPTS = 5
 
 const META_CURSOR = "cursor"
 const META_LAST_LEDGER = "last_indexed_ledger"
+const META_LATEST_LEDGER = "latest_network_ledger"
 
 let dbReady = false
 function ensureDb() {
@@ -188,6 +196,8 @@ function rowToLock(row: LockRow): IndexedLock {
 export interface ContractEvent {
   /** Unique RPC event id — used to deduplicate replayed ranges. */
   id: string
+  /** Contract that emitted the event, supplied by Soroban getEvents. */
+  contractId?: string
   /** The contract address that emitted this event. Used to namespace lock ids. */
   contractId: string
   ledger: number
@@ -223,6 +233,118 @@ function applyRelease(s: ReturnType<typeof buildStatements>, lockId: string, rel
   })
 }
 
+export interface ContractStatus {
+  contractId: string
+  paused: boolean
+  pendingUpgradeHash: string | null
+  pendingUpgradeExecuteAfter: number | null
+  lastUpgradeHash: string | null
+  admin: string | null
+  pendingAdmin: string | null
+  lastEvent: string | null
+  lastEventLedger: number | null
+}
+
+const STATUS_EVENTS = new Set([
+  "contract_paused",
+  "contract_unpaused",
+  "upgrade_proposed",
+  "upgrade_executed",
+  "upgrade_cancelled",
+  "admin_proposed",
+  "admin_accepted",
+  "contract_initialized",
+])
+
+function bytesToHex(value: unknown): string | null {
+  if (typeof value === "string") return value
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("hex")
+  return null
+}
+
+function recordContractStatus(event: ContractEvent, name: string): void {
+  const contractId = event.contractId
+  if (!contractId) return
+
+  db.prepare(
+    `INSERT INTO contract_status (contract_id, last_event, last_event_ledger)
+     VALUES (?, ?, ?)
+     ON CONFLICT(contract_id) DO UPDATE SET last_event = excluded.last_event,
+       last_event_ledger = excluded.last_event_ledger, updated_at = unixepoch()`,
+  ).run(contractId, name, event.ledger)
+
+  const topic = (index: number) => event.topics[index]
+  switch (name) {
+    case "contract_paused":
+      db.prepare("UPDATE contract_status SET paused = 1, updated_at = unixepoch() WHERE contract_id = ?").run(contractId)
+      break
+    case "contract_unpaused":
+      db.prepare("UPDATE contract_status SET paused = 0, updated_at = unixepoch() WHERE contract_id = ?").run(contractId)
+      break
+    case "upgrade_proposed":
+      db.prepare(
+        `UPDATE contract_status
+         SET pending_upgrade_hash = ?, pending_upgrade_execute_after = ?, updated_at = unixepoch()
+         WHERE contract_id = ?`,
+      ).run(bytesToHex(topic(2)), Number(topic(1)), contractId)
+      break
+    case "upgrade_executed": {
+      const hash = bytesToHex(topic(2))
+      db.prepare(
+        `UPDATE contract_status
+         SET pending_upgrade_hash = NULL, pending_upgrade_execute_after = NULL,
+             last_upgrade_hash = ?, updated_at = unixepoch()
+         WHERE contract_id = ?`,
+      ).run(hash, contractId)
+      break
+    }
+    case "upgrade_cancelled":
+      db.prepare(
+        `UPDATE contract_status
+         SET pending_upgrade_hash = NULL, pending_upgrade_execute_after = NULL,
+             updated_at = unixepoch()
+         WHERE contract_id = ?`,
+      ).run(contractId)
+      break
+    case "admin_proposed":
+      db.prepare("UPDATE contract_status SET pending_admin = ?, updated_at = unixepoch() WHERE contract_id = ?").run(
+        String(topic(1)),
+        contractId,
+      )
+      break
+    case "admin_accepted":
+    case "contract_initialized":
+      db.prepare(
+        "UPDATE contract_status SET admin = ?, pending_admin = NULL, updated_at = unixepoch() WHERE contract_id = ?",
+      ).run(String(topic(1)), contractId)
+      break
+  }
+}
+
+export function getContractStatuses(): ContractStatus[] {
+  ensureDb()
+  const rows = db.prepare("SELECT * FROM contract_status ORDER BY contract_id").all() as Array<{
+    contract_id: string
+    paused: number
+    pending_upgrade_hash: string | null
+    pending_upgrade_execute_after: number | null
+    last_upgrade_hash: string | null
+    admin: string | null
+    pending_admin: string | null
+    last_event: string | null
+    last_event_ledger: number | null
+  }>
+  return rows.map((row) => ({
+    contractId: row.contract_id,
+    paused: row.paused === 1,
+    pendingUpgradeHash: row.pending_upgrade_hash,
+    pendingUpgradeExecuteAfter: row.pending_upgrade_execute_after,
+    lastUpgradeHash: row.last_upgrade_hash,
+    admin: row.admin,
+    pendingAdmin: row.pending_admin,
+    lastEvent: row.last_event,
+    lastEventLedger: row.last_event_ledger,
+  }))
 /** Apply a lock extension and re-arm reminders whose thresholds moved back into the future. */
 function extendLock(s: ReturnType<typeof buildStatements>, lockId: string, newUnlockAt: number) {
   s.extendUnlock.run(newUnlockAt, lockId)
@@ -269,6 +391,13 @@ export function processEvent(event: ContractEvent): string | undefined {
   let newlyCreatedLockId: string | undefined
 
   const apply = db.transaction(() => {
+    if (STATUS_EVENTS.has(name)) {
+      const statusLockId = `contract:${event.contractId ?? "unknown"}`
+      if (!s.insertEvent.run(event.id, event.ledger, name, statusLockId).changes) return
+      recordContractStatus(event, name)
+      return
+    }
+
     switch (name) {
       case "lock_created": {
         const [, id, creator, token, amount, beneficiary, unlockAt] = event.topics
@@ -562,6 +691,10 @@ export function getStats(): AggregateStats {
     uniqueTokens: totals.uniqueTokens,
     recentLocks,
     upcomingUnlocks,
+    lastIndexedLedger: getLastIndexed(),
+    latestLedger: Number(getMeta(META_LATEST_LEDGER) ?? 0),
+    lagLedgers: Math.max(Number(getMeta(META_LATEST_LEDGER) ?? 0) - getLastIndexed(), 0),
+    contractStatus: getContractStatuses(),
   }
 }
 
@@ -814,7 +947,7 @@ export async function pollOnce(
     // the same path used when no cursor exists yet — instead of retrying
     // the same dead cursor forever.
     if (cursor && /cursor/i.test(String((err as Error)?.message ?? err))) {
-      console.error(`[indexer] cursor rejected by RPC, clearing it and resuming from the last indexed ledger:`, err)
+      log.warn("cursor rejected by RPC; clearing cursor and resuming from last indexed ledger", { error: err })
       deleteMeta(META_CURSOR)
       return 0
     }
@@ -834,6 +967,7 @@ export async function pollOnce(
       process(event)
       const newLockId = processEvent({
         id: raw.id,
+        contractId: raw.contractId,
         contractId: raw.contractId ?? "",
         ledger: raw.ledger,
         timestamp: raw.ledgerClosedAt ? Math.floor(Date.parse(raw.ledgerClosedAt) / 1000) : undefined,
@@ -852,6 +986,7 @@ export async function pollOnce(
         })
       }
     } catch (err) {
+      log.error("failed to process event", { eventId: raw.id, error: err })
       console.error(`[indexer] failed to process event ${raw.id}:`, err)
       // Record it so the next poll retries it instead of permanently losing
       // the lock state change — the cursor has already moved past it (#1122).
@@ -860,6 +995,7 @@ export async function pollOnce(
   }
 
   if (resp.cursor) setMeta(META_CURSOR, resp.cursor)
+  setMeta(META_LATEST_LEDGER, String(resp.latestLedger))
   const maxEventLedger = resp.events.reduce((max, e) => Math.max(max, e.ledger), 0)
   const pageFull = resp.events.length >= EVENTS_PAGE_LIMIT
   // If the page was full there may be more events in the same ledger that the
@@ -898,7 +1034,7 @@ export function startPolling(options: { server?: EventSource; intervalMs?: numbe
         count = await pollOnce(server)
       } while (count >= EVENTS_PAGE_LIMIT)
     } catch (err) {
-      console.error("[indexer] poll failed:", err)
+      log.error("poll failed", { error: err })
     } finally {
       inFlight = false
     }
@@ -915,6 +1051,8 @@ const isMain =
   typeof process !== "undefined" && process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (isMain) {
+  log.info("polling started", { rpcUrl: RPC_URL, intervalMs: POLL_INTERVAL_MS })
+  startPolling()
   console.log(`[indexer] polling ${RPC_URL} every ${POLL_INTERVAL_MS}ms`)
   const poller = startPolling()
 
