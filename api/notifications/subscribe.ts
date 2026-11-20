@@ -1,9 +1,10 @@
 /**
  * POST /api/notifications/subscribe
  *
- * Upserts a notification subscription for a lock. The caller identifies
- * themselves by their Stellar address; at minimum one channel (email or
- * webhook_url) must be provided.
+ * Upserts a notification subscription for a lock. The caller must hold a
+ * session for `address` (Authorization: Bearer <token>, obtained via
+ * /api/notifications/challenge + /api/notifications/session); at minimum one
+ * channel (email or webhook_url) must be provided.
  *
  * Request body (JSON):
  * {
@@ -20,17 +21,21 @@
  * Responses:
  *   201 { id }            – subscription created / updated
  *   400 { error }         – validation failure
+ *   401 { error }         – missing / invalid session
+ *   403 { error }         – session belongs to a different address
  *   405                   – method not POST
  */
 
 import { randomUUID } from 'node:crypto'
 import { db, initDb } from '../../indexer/db.js'
 import { validateWebhookUrl } from '../../indexer/ssrf.js'
+import { requireAddressSession } from '../_lib/notification-auth.js'
 import { createVerifyToken, sendVerificationEmail } from '../../indexer/mailer.js'
 
 interface Req {
   method?: string
   body?: unknown
+  headers?: Record<string, string | string[] | undefined>
 }
 
 interface Res {
@@ -71,6 +76,8 @@ export default async function handler(req: Req, res: Res) {
   if (typeof address !== 'string' || !STELLAR_ADDRESS_RE.test(address)) {
     return res.status(400).json({ error: 'address must be a valid Stellar address' })
   }
+  // Caller must prove they own `address` (see api/_lib/notification-auth.ts).
+  if (!requireAddressSession(req, res, address)) return
   if (email !== undefined && email !== null && (typeof email !== 'string' || !EMAIL_RE.test(email))) {
     return res.status(400).json({ error: 'email is not a valid email address' })
   }
@@ -81,9 +88,6 @@ export default async function handler(req: Req, res: Res) {
     // Resolves the hostname and rejects it if any address is private/reserved.
     const urlErr = await validateWebhookUrl(webhookUrl)
     if (urlErr) return res.status(400).json({ error: urlErr })
-  }
-  if (email === undefined && webhookUrl === undefined) {
-    return res.status(400).json({ error: 'at least one of email or webhookUrl is required' })
   }
 
   // Normalise lockId: bare numeric ids are treated as token locks
@@ -109,7 +113,20 @@ export default async function handler(req: Req, res: Res) {
       }
     | undefined
 
+  // Preserve existing values for omitted fields (undefined means not provided;
+  // an explicit null clears the channel).
+  const newEmail = (email !== undefined ? email : existing?.email) ?? null
+  const newWebhookUrl = (webhookUrl !== undefined ? webhookUrl : existing?.webhook_url) ?? null
+
+  // null and undefined both mean "no channel" — a subscription must end up
+  // with at least one channel after merging with any existing row.
+  if (newEmail === null && newWebhookUrl === null) {
+    return res.status(400).json({ error: 'at least one of email or webhookUrl is required' })
+  }
+
   if (existing) {
+    const channelsChanged =
+      newEmail !== (existing.email ?? null) || newWebhookUrl !== (existing.webhook_url ?? null)
     // Preserve existing values for omitted fields (undefined means not provided)
     const newEmail = email !== undefined ? email : existing.email
     const newWebhookUrl = webhookUrl !== undefined ? webhookUrl : existing.webhook_url
@@ -131,7 +148,7 @@ export default async function handler(req: Req, res: Res) {
          emailChanged ? ', email_verified = 0, email_verify_token_hash = NULL, email_verify_sent_at = NULL' : ''
        }
        WHERE id = ?`,
-    ).run(newEmail ?? null, newWebhookUrl ?? null, existing.id)
+    ).run(newEmail, newWebhookUrl, existing.id)
 
     if (verify && newEmail) {
       db.prepare(
@@ -146,6 +163,9 @@ export default async function handler(req: Req, res: Res) {
   const id = randomUUID()
   const verify = email ? createVerifyToken() : null
   db.prepare(
+    `INSERT INTO notification_subscriptions (id, lock_id, address, email, webhook_url)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, lockId, address, newEmail, newWebhookUrl)
     `INSERT INTO notification_subscriptions
        (id, lock_id, address, email, webhook_url, email_verified, email_verify_token_hash, email_verify_sent_at)
      VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,

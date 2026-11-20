@@ -1,10 +1,7 @@
-import { getStats, getTopTokens, type IndexedLock, type TokenAggregate } from "../indexer/index"
+import { getStats, getTopTokens, type TokenAggregate } from "../indexer/index"
+import { serializeLock } from "./_lib/serialize-lock"
 
 type JsonRes = { status: (code: number) => { json: (payload: unknown) => void } }
-
-function serializeLock(lock: IndexedLock) {
-  return { ...lock, amount: lock.amount.toString() }
-}
 
 function serializeTokenAggregate(agg: TokenAggregate) {
   return { ...agg, totalLocked: agg.totalLocked.toString() }

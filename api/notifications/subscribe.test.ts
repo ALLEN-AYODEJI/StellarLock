@@ -22,6 +22,11 @@ vi.mock('../../indexer/db.js', () => ({
   initDb: vi.fn(),
 }))
 
+// Session auth is exercised separately — treat every request as authenticated.
+vi.mock('../_lib/notification-auth.js', () => ({
+  requireAddressSession: vi.fn(() => true),
+}))
+
 vi.mock('../../indexer/ssrf.js', () => ({
   validateWebhookUrl: vi.fn().mockResolvedValue(null), // allow by default
 }))
