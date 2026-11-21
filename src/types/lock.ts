@@ -17,7 +17,7 @@ export function lockKey(l: { kind: LockKind; id: string }): string {
 export const DEX_VALUES = ["aquarius", "soroswap"] as const
 export type Dex = (typeof DEX_VALUES)[number]
 
-export type LockStatus = "locked" | "unlockable" | "withdrawn"
+export type LockStatus = "locked" | "unlockable" | "withdrawn" | "archived"
 
 export interface TokenMeta {
   /** Contract address of the token (C...) */
