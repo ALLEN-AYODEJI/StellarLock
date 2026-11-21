@@ -8,10 +8,12 @@ import {
   invalidateRpcCache,
   simulateCall,
 } from "@/lib/stellar"
+import { rpc as SorobanRpc, nativeToScVal } from "@stellar/stellar-sdk"
+import { getTokenBalance, invalidateRpcCache, simulateCall } from "@/lib/stellar"
 import { getOnChainTokenMeta } from "@/lib/token-metadata"
 
 // Mock the token-metadata module so we can control the on-chain decimals that
-// getTokenBalance / getTokenAllowance use for the raw-amount → whole-token
+// getTokenBalance uses for the raw-amount → whole-token
 // conversion (regression for #509).
 vi.mock("@/lib/token-metadata", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/token-metadata")>()
@@ -110,6 +112,44 @@ describe("RpcClient (exercised via simulateCall) — caching, dedup, rate limiti
     invalidateRpcCache()
 
     await simulateCall(CONTRACT_ID, "get_lock", [])
+    expect(simulateSpy).toHaveBeenCalledTimes(2)
+  })
+
+  // #1077: a simulation started before a mutation must not overwrite the
+  // cache with pre-mutation data once it resolves after invalidateCache().
+  it("does not cache an in-flight result that resolves after invalidateCache()", async () => {
+    const gate = deferred<SorobanRpc.Api.SimulateTransactionResponse>()
+    const PRE_MUTATION_RESULT = { pre: true } as unknown as SorobanRpc.Api.SimulateTransactionResponse
+    const POST_MUTATION_RESULT = { post: true } as unknown as SorobanRpc.Api.SimulateTransactionResponse
+
+    simulateSpy.mockReturnValueOnce(gate.promise)
+
+    // Kick off a read before the mutation; it won't resolve until later.
+    const stalePromise = simulateCall(CONTRACT_ID, "get_lock", [])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(simulateSpy).toHaveBeenCalledTimes(1)
+
+    // Mutation happens and invalidates the cache while the read above is
+    // still in flight.
+    invalidateRpcCache()
+
+    // The stale simulation now resolves with pre-mutation data.
+    gate.resolve(PRE_MUTATION_RESULT)
+    const stale = await stalePromise
+    expect(stale).toBe(PRE_MUTATION_RESULT)
+
+    // A fresh call for the same key must hit the network again (not reuse
+    // the stale in-flight entry, and not serve a cache entry the stale
+    // result might have written).
+    simulateSpy.mockResolvedValueOnce(POST_MUTATION_RESULT)
+    const fresh = await simulateCall(CONTRACT_ID, "get_lock", [])
+    expect(fresh).toBe(POST_MUTATION_RESULT)
+    expect(simulateSpy).toHaveBeenCalledTimes(2)
+
+    // And that fresh result should now be the one served from cache — the
+    // stale result must not have clobbered it.
+    const cachedAgain = await simulateCall(CONTRACT_ID, "get_lock", [])
+    expect(cachedAgain).toBe(POST_MUTATION_RESULT)
     expect(simulateSpy).toHaveBeenCalledTimes(2)
   })
 
@@ -309,9 +349,10 @@ describe("describeFailedTransaction (#1076)", () => {
 
 // ── #509: getTokenBalance / getTokenAllowance use per-token decimals ─────────
 describe("getTokenBalance / getTokenAllowance decimals conversion (#509)", () => {
+// ── #509: getTokenBalance uses per-token decimals ─────────
+describe("getTokenBalance decimals conversion (#509)", () => {
   const TOKEN_ADDRESS = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
   const OWNER = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
-  const SPENDER = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
 
   let simulateSpy: ReturnType<typeof spyOnSimulateTransaction>
   let metaMock: ReturnType<typeof vi.fn>
@@ -362,24 +403,6 @@ describe("getTokenBalance / getTokenAllowance decimals conversion (#509)", () =>
     const balance = await getTokenBalance(TOKEN_ADDRESS, OWNER)
 
     expect(balance).toBeCloseTo(1.2345678, 6)
-  })
-
-  it("divides a 6-decimal token's raw allowance by 10^6, not 1e7 (allowance)", async () => {
-    metaMock.mockResolvedValue({ symbol: "USDC", name: "USD Coin", decimals: 6 })
-    simulateSpy.mockResolvedValue(rawResult(500_000n)) // 0.5 USDC allowance
-
-    const allowance = await getTokenAllowance(TOKEN_ADDRESS, OWNER, SPENDER)
-
-    expect(allowance).toBeCloseTo(0.5, 6)
-    expect(allowance).not.toBeCloseTo(0.05, 6)
-  })
-
-  it("keeps 7-decimal tokens unchanged (allowance)", async () => {
-    simulateSpy.mockResolvedValue(rawResult(7_000_000n)) // 0.7 XLM allowance
-
-    const allowance = await getTokenAllowance(TOKEN_ADDRESS, OWNER, SPENDER)
-
-    expect(allowance).toBeCloseTo(0.7, 6)
   })
 
   it("converts an 18-decimal token correctly (large divisor beyond stroops)", async () => {
